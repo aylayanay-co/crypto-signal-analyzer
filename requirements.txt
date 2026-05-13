@@ -1,0 +1,7 @@
+requests
+pandas
+streamlit
+plotly
+ta
+python-binance
+numpy
