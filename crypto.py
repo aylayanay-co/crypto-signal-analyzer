@@ -10,13 +10,13 @@ from datetime import datetime, timedelta
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
 
-API_KEY = "CG-DpNu1iDrgCRPmzLHfYHpvDNJ"
+API_KEY = st.secrets.get("COINGECKO_API_KEY", os.environ.get("COINGECKO_API_KEY", ""))
 HEADERS = {"x-cg-demo-api-key": API_KEY}
-NEWS_API_KEY = "fa6bb089afac2cc2f72a95f60a40f74a"
-TELEGRAM_TOKEN = "8685046826:AAE4rItj7gp4xcyfB4wKlrXztvACHVVP6Vs"
-TELEGRAM_CHAT_ID = "8575681641"
-BINANCE_API_KEY = "nAIlPLWuPPWalmYwKEpPcC3bPRhip9JzqWrtSveeV0b6uLkd7hXqMgwaODNea6Vf"
-BINANCE_SECRET_KEY = "NVHJFZYLwBt7MigXJje6AKx1M17FibXuYBfwMHc8ioxYCcmyfStEySrV8bqT2zGT"
+NEWS_API_KEY = st.secrets.get("GNEWS_API_KEY", os.environ.get("GNEWS_API_KEY", ""))
+TELEGRAM_TOKEN = st.secrets.get("TELEGRAM_TOKEN", os.environ.get("TELEGRAM_TOKEN", ""))
+TELEGRAM_CHAT_ID = st.secrets.get("TELEGRAM_CHAT_ID", os.environ.get("TELEGRAM_CHAT_ID", ""))
+BINANCE_API_KEY = st.secrets.get("BINANCE_API_KEY", os.environ.get("BINANCE_API_KEY", ""))
+BINANCE_SECRET_KEY = st.secrets.get("BINANCE_SECRET_KEY", os.environ.get("BINANCE_SECRET_KEY", ""))
 JOURNAL_FILE = "trade_journal.json"
 PAPER_FILE = "paper_trades.json"
 TOP_COINS_CACHE_FILE = "top_coins_cache.json"
