@@ -1487,11 +1487,47 @@ with tab5:
             send_telegram("🤖 <b>AUTO-PILOT BOUGHT</b>\nCoin: " + c["coin_name"] + "\nPrice: $" + str(round(entry_price, 4)) + "\nBull: " + str(c["bull"]) + " · Confidence: " + str(c["confidence"]) + "%\nSL: $" + str(round(sl_px, 4)) + "\nTP: $" + str(round(tp_px, 4)))
         if not bought:
             cfg["log"].insert(0, str(datetime.now())[:19] + " · Scan complete: no qualifying signals")
+        # ── Signal-based selling: check held positions for SELL signals ──
+        sold = []
+        for coin_name_held in list(held):
+            coin_id_held = COINS.get(coin_name_held, "")
+            if not coin_id_held:
+                continue
+            held_result = quick_analyze(coin_id_held, days=90, coin_keywords=COIN_KEYWORDS_FULL)
+            if not held_result.get("success"):
+                continue
+            if held_result["signal"] in ("SELL", "STRONG SELL"):
+                pos_held = paper_d["positions"].get(coin_name_held)
+                if not pos_held:
+                    continue
+                sell_price = held_result["price"]
+                sale_value = pos_held["coins"] * sell_price
+                profit_usd = sale_value - pos_held["cost"]
+                profit_pct = (profit_usd / pos_held["cost"]) * 100
+                paper_d["balance"] += sale_value
+                paper_d["trades"].append({
+                    "type": "SELL", "coin": coin_name_held, "price": sell_price,
+                    "amount": sale_value, "coins": pos_held["coins"],
+                    "date": str(datetime.now())[:19],
+                    "profit_usd": profit_usd, "profit_pct": profit_pct,
+                    "reason": "SIGNAL-SELL (" + held_result["signal"] + ")",
+                    "entry_rsi": 0, "entry_bull": 0, "entry_bear": 0,
+                    "entry_volume_ratio": 0, "entry_category": categorize_coin(coin_id_held),
+                    "source": "auto-pilot",
+                })
+                del paper_d["positions"][coin_name_held]
+                sold.append(coin_name_held)
+                cfg["log"].insert(0, str(datetime.now())[:19] + " · SIGNAL SOLD " + coin_name_held + " @ $" + str(round(sell_price, 4)) + " · " + held_result["signal"] + " · P&L: " + ("+" if profit_usd >= 0 else "") + "$" + str(round(profit_usd, 2)))
+                if profit_usd >= 0:
+                    send_telegram("🤖 <b>AUTO-PILOT SIGNAL SELL ✅</b>\nCoin: " + coin_name_held + "\nSignal: " + held_result["signal"] + "\nPrice: $" + str(round(sell_price, 4)) + "\nProfit: +$" + str(round(profit_usd, 2)) + " (+" + str(round(profit_pct, 2)) + "%)")
+                else:
+                    send_telegram("🤖 <b>AUTO-PILOT SIGNAL SELL ❌</b>\nCoin: " + coin_name_held + "\nSignal: " + held_result["signal"] + "\nPrice: $" + str(round(sell_price, 4)) + "\nLoss: -$" + str(round(abs(profit_usd), 2)) + " (" + str(round(profit_pct, 2)) + "%)")
+            time.sleep(0.4)
         save_paper_trades(paper_d)
         cfg["last_scan"] = datetime.now().isoformat()
         cfg["log"] = cfg["log"][:30]
         save_autopilot(cfg)
-        return {"action": "bought" if bought else "no_signals", "coins": bought}
+        return {"action": "traded" if bought or sold else "no_signals", "coins": bought, "sold": sold}
 
     # Auto-trigger if enabled and due
     if autopilot["enabled"]:
@@ -1505,8 +1541,11 @@ with tab5:
         if should_run:
             with st.spinner("🤖 Auto-Pilot is scanning..."):
                 result = run_autopilot_scan()
-                if result and result.get("action") == "bought":
+                if result and result.get("coins"):
                     st.success("🤖 Auto-Pilot bought: " + ", ".join(result["coins"]))
+                if result and result.get("sold"):
+                    st.warning("🤖 Auto-Pilot signal-sold: " + ", ".join(result["sold"]))
+                if result and (result.get("coins") or result.get("sold")):
                     st.rerun()
 
     # Manual trigger
@@ -1516,12 +1555,15 @@ with tab5:
             with st.spinner("Scanning..."):
                 result = run_autopilot_scan()
                 if result:
-                    if result["action"] == "bought":
+                    if result.get("coins"):
                         st.success("🤖 Bought: " + ", ".join(result["coins"]))
-                    elif result["action"] == "no_signals":
-                        st.info("No qualifying signals right now.")
-                    else:
-                        st.warning("Skipped: " + result.get("reason", "unknown"))
+                    if result.get("sold"):
+                        st.warning("🤖 Signal-sold: " + ", ".join(result["sold"]))
+                    if not result.get("coins") and not result.get("sold"):
+                        if result["action"] == "no_signals":
+                            st.info("No qualifying signals right now.")
+                        else:
+                            st.warning("Skipped: " + result.get("reason", "unknown"))
                     st.rerun()
     with ap_btn2:
         if st.button("📊 Send Daily Report to Telegram", key="daily_report"):
