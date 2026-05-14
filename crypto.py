@@ -559,7 +559,148 @@ def generate_trade_insights(trades):
         pass
     return insights
 
-def apply_insights_to_picks(picks, insights):
+def run_diagnostic(trades, positions):
+    """Analyze trade history and return prioritized list of issues + recommended fixes."""
+    sell_trades = [t for t in trades if t["type"] == "SELL"]
+    buy_trades = [t for t in trades if t["type"] == "BUY"]
+    issues = []
+    if len(sell_trades) < 3:
+        return [{
+            "severity": "info",
+            "title": "Not enough data yet",
+            "detail": "Need at least 3 closed trades to diagnose. You have " + str(len(sell_trades)) + ".",
+            "fix": "Let auto-pilot run for a few more days."
+        }]
+    wins = [t for t in sell_trades if t["profit_usd"] > 0]
+    losses = [t for t in sell_trades if t["profit_usd"] <= 0]
+    win_rate = len(wins) / len(sell_trades) * 100
+    avg_win = np.mean([t["profit_pct"] for t in wins]) if wins else 0
+    avg_loss = np.mean([t["profit_pct"] for t in losses]) if losses else 0
+    total_pnl = sum(t["profit_usd"] for t in sell_trades)
+    if win_rate < 40:
+        issues.append({
+            "severity": "critical",
+            "title": "Win rate is critically low (" + str(round(win_rate, 1)) + "%)",
+            "detail": "Less than 40% of trades win. The signals aren't reliable enough for current settings.",
+            "fix": "Raise min bull score to 12 and min confidence to 75% in Auto-Pilot settings. Or enable Multi-Timeframe confirmation (next feature).",
+        })
+    elif win_rate < 50:
+        issues.append({
+            "severity": "warning",
+            "title": "Win rate below 50% (" + str(round(win_rate, 1)) + "%)",
+            "detail": "Most trades are losing. Signals work but not strongly enough.",
+            "fix": "Tighten signal filters: min bull score 11+, min confidence 70%+.",
+        })
+    if abs(avg_loss) > avg_win * 1.5 and wins and losses:
+        issues.append({
+            "severity": "critical",
+            "title": "Risk/Reward is inverted",
+            "detail": "Avg loss (" + str(round(avg_loss, 2)) + "%) is bigger than avg win (+" + str(round(avg_win, 2)) + "%). Even winning 50% of the time = losing money.",
+            "fix": "Increase Take Profit ratio to 2.5x or higher. Or tighten Stop Loss to 4%.",
+        })
+    cat_stats = {}
+    for t in sell_trades:
+        cat = t.get("entry_category", "Other")
+        if cat not in cat_stats:
+            cat_stats[cat] = {"w": 0, "l": 0, "pnl": 0}
+        if t["profit_usd"] > 0: cat_stats[cat]["w"] += 1
+        else: cat_stats[cat]["l"] += 1
+        cat_stats[cat]["pnl"] += t["profit_usd"]
+    losing_cats = []
+    for cat, s in cat_stats.items():
+        total = s["w"] + s["l"]
+        if total >= 3 and s["w"]/total < 0.35:
+            losing_cats.append((cat, round(s["w"]/total * 100, 1), s["pnl"]))
+    if losing_cats:
+        worst = max(losing_cats, key=lambda x: abs(x[2]))
+        issues.append({
+            "severity": "warning",
+            "title": worst[0] + " coins are killing you",
+            "detail": "Win rate on " + worst[0] + ": " + str(worst[1]) + "% · Total P&L from this category: $" + str(round(worst[2], 2)),
+            "fix": "Trade Review Engine already deprioritizes this. Consider adding " + worst[0] + " to a hard blacklist.",
+        })
+    sorted_trades = sorted(sell_trades, key=lambda x: x["date"])
+    streak = 0
+    max_streak = 0
+    for t in sorted_trades:
+        if t["profit_usd"] <= 0:
+            streak += 1
+            max_streak = max(max_streak, streak)
+        else:
+            streak = 0
+    if max_streak >= 4:
+        issues.append({
+            "severity": "warning",
+            "title": "Losing streaks happening (" + str(max_streak) + " in a row)",
+            "detail": "Long losing streaks suggest the bot keeps trading through bad market conditions.",
+            "fix": "Add Losing Streak Cooldown — pause auto-pilot for 24h after 3 losses in a row.",
+        })
+    coin_loss_count = {}
+    for t in losses:
+        coin_loss_count[t["coin"]] = coin_loss_count.get(t["coin"], 0) + 1
+    repeat_losers = [(c, n) for c, n in coin_loss_count.items() if n >= 2]
+    if repeat_losers:
+        worst_repeat = max(repeat_losers, key=lambda x: x[1])
+        issues.append({
+            "severity": "warning",
+            "title": "Bot keeps re-buying losers",
+            "detail": "Lost on " + worst_repeat[0] + " " + str(worst_repeat[1]) + " times. Bot doesn't learn coin-level lessons.",
+            "fix": "Add a Re-Entry Blocker — don't auto-buy a coin that lost twice.",
+        })
+    sl_count = len([t for t in losses if t.get("reason") == "STOP-LOSS"])
+    if sl_count >= 5 and sl_count / len(sell_trades) > 0.5:
+        issues.append({
+            "severity": "warning",
+            "title": "Stop-losses triggering too often (" + str(sl_count) + " of " + str(len(sell_trades)) + ")",
+            "detail": "Over half your closes are SL hits. Either entries are bad or SL is too tight.",
+            "fix": "Add Multi-Timeframe confirmation to filter weak entries, OR widen Stop Loss to 6-7%.",
+        })
+    avg_hold = []
+    for t in losses:
+        if t.get("reason") == "STOP-LOSS":
+            avg_hold.append(1)
+    if len(losses) > 0 and len([t for t in losses if t.get("reason") == "STOP-LOSS"]) / max(len(losses),1) > 0.7:
+        issues.append({
+            "severity": "warning",
+            "title": "Losers stop out fast",
+            "detail": "Most losses hit SL quickly — suggests entries are timed poorly.",
+            "fix": "Add Multi-Timeframe filter (require 14d + 30d both bullish before buying).",
+        })
+    tp_count = len([t for t in wins if t.get("reason") == "TAKE-PROFIT"])
+    if tp_count >= 3 and tp_count / len(wins) > 0.6 and avg_win > 0:
+        issues.append({
+            "severity": "info",
+            "title": "Most winners hit fixed TP",
+            "detail": str(tp_count) + " of " + str(len(wins)) + " wins closed at TP. You're leaving money on the table when coins keep running.",
+            "fix": "Add Partial Take-Profit — sell 50% at TP1, let rest ride with trailing stop to capture bigger moves.",
+        })
+    if win_rate > 50 and total_pnl < 0:
+        issues.append({
+            "severity": "critical",
+            "title": "Winning more than losing but still losing money",
+            "detail": "Win rate " + str(round(win_rate, 1)) + "% but P&L is " + str(round(total_pnl, 2)) + ". Classic R:R problem.",
+            "fix": "Avg win must beat avg loss. Either raise TP ratio or tighten SL.",
+        })
+    open_count = len(positions)
+    if open_count >= 6:
+        issues.append({
+            "severity": "info",
+            "title": "Highly diversified portfolio (" + str(open_count) + " open)",
+            "detail": "Wide diversification — small moves on individual coins won't matter much.",
+            "fix": "Consider lowering max_open_positions to 5 to concentrate on best signals.",
+        })
+    if not issues:
+        issues.append({
+            "severity": "success",
+            "title": "No major issues detected!",
+            "detail": "Win rate " + str(round(win_rate, 1)) + "%, P&L $" + str(round(total_pnl, 2)) + ". Bot is performing well.",
+            "fix": "Keep running. Consider adding partial take-profit to amplify winning trades.",
+        })
+    severity_order = {"critical": 0, "warning": 1, "info": 2, "success": 3}
+    issues.sort(key=lambda x: severity_order.get(x["severity"], 4))
+    return issues
+
+
     """Re-rank and filter picks based on learned insights."""
     if not insights:
         return picks
@@ -1315,7 +1456,44 @@ with tab5:
         st.success("✅ Paper account reset to $10,000!")
         st.rerun()
 
-    # ── AUTO-PILOT ────────────────────────────────────────────────────────────
+    # ── DIAGNOSTIC ENGINE ─────────────────────────────────────────────────────
+    st.divider()
+    st.subheader("🔧 Diagnostic Engine")
+    st.caption("Analyzes your trades and tells you exactly what's broken — and which feature would fix it.")
+    if st.button("🔍 Run Diagnostic", key="run_diag"):
+        st.session_state["diag_results"] = run_diagnostic(paper_trades, paper_positions)
+    if "diag_results" in st.session_state:
+        diag = st.session_state["diag_results"]
+        critical_count = len([d for d in diag if d["severity"] == "critical"])
+        warning_count = len([d for d in diag if d["severity"] == "warning"])
+        info_count = len([d for d in diag if d["severity"] == "info"])
+        dc1, dc2, dc3 = st.columns(3)
+        dc1.metric("🔴 Critical", critical_count)
+        dc2.metric("🟡 Warnings", warning_count)
+        dc3.metric("🔵 Info", info_count)
+        for i, issue in enumerate(diag, 1):
+            sev = issue["severity"]
+            if sev == "critical":
+                with st.container():
+                    st.error("**🔴 " + str(i) + ". " + issue["title"] + "**")
+                    st.markdown(issue["detail"])
+                    st.markdown("**💡 Fix:** " + issue["fix"])
+            elif sev == "warning":
+                with st.container():
+                    st.warning("**🟡 " + str(i) + ". " + issue["title"] + "**")
+                    st.markdown(issue["detail"])
+                    st.markdown("**💡 Fix:** " + issue["fix"])
+            elif sev == "success":
+                with st.container():
+                    st.success("**✅ " + issue["title"] + "**")
+                    st.markdown(issue["detail"])
+                    st.markdown("**💡 Next step:** " + issue["fix"])
+            else:
+                with st.container():
+                    st.info("**🔵 " + str(i) + ". " + issue["title"] + "**")
+                    st.markdown(issue["detail"])
+                    st.markdown("**💡 Fix:** " + issue["fix"])
+
     AUTOPILOT_FILE = "autopilot_config.json"
 
     def load_autopilot():
