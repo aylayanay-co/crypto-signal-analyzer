@@ -600,7 +600,7 @@ with st.expander("🎯 **Today's Picks** — smart suggestions based on signals"
     if st.button("🔍 Find Today's Best Opportunities", type="primary", key="todays_picks_btn"):
         paper_data_pick = load_paper_trades()
         held_coins = set(paper_data_pick.get("positions", {}).keys())
-        coin_items = list(COINS.items())[:20]
+        coin_items = list(COINS.items())
         progress = st.progress(0)
         status = st.empty()
         all_results = []
@@ -1431,7 +1431,7 @@ with tab5:
             return {"action": "skipped", "reason": "daily limit"}
         # Scan top 20
         results = []
-        coin_items = list(COINS.items())[:20]
+        coin_items = list(COINS.items())
         for coin_name_a, coin_id_a in coin_items:
             if coin_name_a in held:
                 continue
