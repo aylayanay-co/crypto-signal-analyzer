@@ -290,6 +290,35 @@ def run_backtest(prices, initial_capital=100, stop_loss_pct=5, take_profit_pct=1
         "max_drawdown": max_drawdown, "equity_curve": equity_curve, "trades": trades,
     }
 
+def quick_analyze_short(coin_id):
+    """Lightweight 14d analysis just for signal direction. Used for multi-timeframe confirmation."""
+    try:
+        hist_url = "https://api.coingecko.com/api/v3/coins/" + coin_id + "/market_chart?vs_currency=usd&days=14"
+        hist_res = requests.get(hist_url, headers=HEADERS, timeout=10)
+        prices = [p[1] for p in hist_res.json()["prices"]]
+        volumes = [v[1] for v in hist_res.json()["total_volumes"]]
+        if len(prices) < 20:
+            return None
+        df = pd.DataFrame({"close": prices, "volume": volumes})
+        df["rsi"] = ta.momentum.RSIIndicator(df["close"], window=14).rsi()
+        macd = ta.trend.MACD(df["close"])
+        df["macd_hist"] = macd.macd_diff()
+        df["ema9"] = ta.trend.EMAIndicator(df["close"], window=9).ema_indicator()
+        df["ema21"] = ta.trend.EMAIndicator(df["close"], window=21).ema_indicator()
+        latest = df.iloc[-1]
+        bull = bear = 0
+        if latest["rsi"] < 40: bull += 1
+        elif latest["rsi"] > 60: bear += 1
+        if latest["macd_hist"] > 0: bull += 1
+        else: bear += 1
+        if latest["ema9"] > latest["ema21"]: bull += 1
+        else: bear += 1
+        if bull > bear: return "BULLISH"
+        elif bear > bull: return "BEARISH"
+        return "NEUTRAL"
+    except:
+        return None
+
 def quick_analyze(coin_id, days=90, coin_keywords=None):
     if coin_keywords is None:
         coin_keywords = COIN_KEYWORDS
@@ -1505,6 +1534,7 @@ with tab5:
             "min_confidence": 65,
             "min_bull_score": 10,
             "position_size": 500.0,
+            "multi_timeframe": True,
             "last_scan": None,
             "trades_today": [],
             "log": [],
@@ -1560,6 +1590,8 @@ with tab5:
         with ac3:
             new_min_bull = st.number_input("Min bull score", min_value=7, max_value=15, value=autopilot["min_bull_score"], key="ap_min_bull")
             new_pos_size = st.number_input("Position size ($)", min_value=10.0, max_value=5000.0, value=autopilot["position_size"], step=50.0, key="ap_pos_size")
+        new_mtf = st.checkbox("🔄 Multi-Timeframe Confirmation (require 14d signal to agree before buying)",
+                              value=autopilot.get("multi_timeframe", True), key="ap_mtf")
         if st.button("💾 Save Settings", key="save_ap"):
             autopilot["scan_every_hours"] = int(new_scan_hrs)
             autopilot["max_trades_per_day"] = int(new_max_daily)
@@ -1567,6 +1599,7 @@ with tab5:
             autopilot["min_confidence"] = int(new_min_conf)
             autopilot["min_bull_score"] = int(new_min_bull)
             autopilot["position_size"] = float(new_pos_size)
+            autopilot["multi_timeframe"] = bool(new_mtf)
             save_autopilot(autopilot)
             st.success("Saved!")
             st.rerun()
@@ -1639,6 +1672,13 @@ with tab5:
             if paper_d["balance"] < cfg["position_size"]:
                 cfg["log"].insert(0, str(datetime.now())[:19] + " · Skipped " + c["coin_name"] + ": low balance")
                 break
+            if cfg.get("multi_timeframe", True):
+                short_signal = quick_analyze_short(c["coin_id"])
+                if short_signal != "BULLISH":
+                    cfg["log"].insert(0, str(datetime.now())[:19] + " · Skipped " + c["coin_name"] + ": 14d signal " + str(short_signal) + " (need BULLISH)")
+                    time.sleep(0.4)
+                    continue
+                time.sleep(0.4)
             entry_price = c["price"]
             coins_bought = cfg["position_size"] / entry_price
             sl_px = entry_price * (1 - stop_loss_pct / 100)
@@ -2030,6 +2070,51 @@ with tab5:
             pc2.error("⚠️ Worst: **" + worst_coin[0] + "** · " + ("+" if worst_coin[1]["total_pnl"] >= 0 else "") + "$" + str(round(worst_coin[1]["total_pnl"], 2)))
     else:
         st.info("Performance per coin appears after you close some trades.")
+
+    # ── EQUITY CURVE ──────────────────────────────────────────────────────────
+    st.divider()
+    st.subheader("📈 Equity Curve")
+    sell_trades_eq = [t for t in paper_trades if t["type"] == "SELL"]
+    if sell_trades_eq:
+        sorted_sells = sorted(sell_trades_eq, key=lambda x: x["date"])
+        running_balance = 10000.0
+        eq_dates = ["Start"]
+        eq_balances = [running_balance]
+        for t in sorted_sells:
+            running_balance += t["profit_usd"]
+            eq_dates.append(t["date"][5:16])
+            eq_balances.append(round(running_balance, 2))
+        import plotly.graph_objects as go
+        eq_fig = go.Figure()
+        eq_fig.add_trace(go.Scatter(
+            x=eq_dates, y=eq_balances, mode="lines+markers",
+            line=dict(color="#16a34a" if running_balance >= 10000 else "#dc2626", width=3),
+            marker=dict(size=6),
+            fill="tozeroy", fillcolor="rgba(22,163,74,0.1)" if running_balance >= 10000 else "rgba(220,38,38,0.1)",
+            name="Account Balance"
+        ))
+        eq_fig.add_hline(y=10000, line_dash="dash", line_color="gray",
+                         annotation_text="Starting balance", annotation_position="right")
+        eq_fig.update_layout(
+            template="plotly_dark", height=380,
+            yaxis_title="Account Balance ($)", xaxis_title="",
+            showlegend=False,
+            margin=dict(l=20, r=20, t=30, b=20),
+        )
+        st.plotly_chart(eq_fig, use_container_width=True)
+        change_total = running_balance - 10000
+        change_pct = (change_total / 10000) * 100
+        eq_c1, eq_c2, eq_c3 = st.columns(3)
+        eq_c1.metric("Starting", "$10,000")
+        eq_c2.metric("Current (realized)", "$" + str(round(running_balance, 2)),
+                     delta=("+" if change_total >= 0 else "") + "$" + str(round(change_total, 2)))
+        eq_c3.metric("Return", ("+" if change_pct >= 0 else "") + str(round(change_pct, 2)) + "%")
+        peak = max(eq_balances)
+        drawdown_from_peak = ((running_balance - peak) / peak) * 100
+        if drawdown_from_peak < -5:
+            st.warning("📉 Currently " + str(round(abs(drawdown_from_peak), 2)) + "% below peak of $" + str(round(peak, 2)))
+    else:
+        st.info("Equity curve will appear after your first closed trade.")
 
     st.divider()
     st.subheader("📜 Paper Trade History")
