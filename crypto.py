@@ -290,6 +290,35 @@ def run_backtest(prices, initial_capital=100, stop_loss_pct=5, take_profit_pct=1
         "max_drawdown": max_drawdown, "equity_curve": equity_curve, "trades": trades,
     }
 
+def check_btc_health():
+    """Returns BTC's 24h change %. Used as a market filter."""
+    try:
+        url = "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids=bitcoin"
+        res = requests.get(url, headers=HEADERS, timeout=10)
+        return res.json()[0].get("price_change_percentage_24h", 0) or 0
+    except:
+        return 0
+
+def get_fear_greed():
+    """Returns Fear & Greed Index value (0-100)."""
+    try:
+        res = requests.get("https://api.alternative.me/fng/", timeout=10)
+        return int(res.json()["data"][0]["value"])
+    except:
+        return 50
+
+def detect_hot_sectors(scan_results):
+    """From scanner results, find which categories have the most STRONG BUY signals."""
+    sector_scores = {}
+    for r in scan_results:
+        if r["signal"] in ("STRONG BUY", "BUY"):
+            cat = categorize_coin(r["coin_id"])
+            if cat not in sector_scores:
+                sector_scores[cat] = {"signals": 0, "total_bull": 0}
+            sector_scores[cat]["signals"] += 1
+            sector_scores[cat]["total_bull"] += r["bull"]
+    return sector_scores
+
 def quick_analyze_short(coin_id):
     """Lightweight 14d analysis just for signal direction. Used for multi-timeframe confirmation."""
     try:
@@ -1535,6 +1564,10 @@ with tab5:
             "min_bull_score": 10,
             "position_size": 500.0,
             "multi_timeframe": True,
+            "btc_filter": True,
+            "btc_threshold": -3.0,
+            "sector_rotation": True,
+            "sentiment_override": True,
             "last_scan": None,
             "trades_today": [],
             "log": [],
@@ -1592,6 +1625,19 @@ with tab5:
             new_pos_size = st.number_input("Position size ($)", min_value=10.0, max_value=5000.0, value=autopilot["position_size"], step=50.0, key="ap_pos_size")
         new_mtf = st.checkbox("🔄 Multi-Timeframe Confirmation (require 14d signal to agree before buying)",
                               value=autopilot.get("multi_timeframe", True), key="ap_mtf")
+        st.markdown("**🛡️ Smart Filters**")
+        nf1, nf2 = st.columns(2)
+        with nf1:
+            new_btc_filter = st.checkbox("🟠 BTC Crash Filter (pause buys when BTC drops hard)",
+                                         value=autopilot.get("btc_filter", True), key="ap_btc")
+            new_btc_thresh = st.number_input("Pause if BTC 24h drops below (%)",
+                                             min_value=-15.0, max_value=-1.0,
+                                             value=autopilot.get("btc_threshold", -3.0), step=0.5, key="ap_btc_thr")
+        with nf2:
+            new_sector = st.checkbox("🔥 Sector Rotation (prefer hot sectors)",
+                                     value=autopilot.get("sector_rotation", True), key="ap_sector")
+            new_sentiment = st.checkbox("😨 Sentiment Override (adapt to Fear & Greed)",
+                                        value=autopilot.get("sentiment_override", True), key="ap_sent")
         if st.button("💾 Save Settings", key="save_ap"):
             autopilot["scan_every_hours"] = int(new_scan_hrs)
             autopilot["max_trades_per_day"] = int(new_max_daily)
@@ -1600,9 +1646,44 @@ with tab5:
             autopilot["min_bull_score"] = int(new_min_bull)
             autopilot["position_size"] = float(new_pos_size)
             autopilot["multi_timeframe"] = bool(new_mtf)
+            autopilot["btc_filter"] = bool(new_btc_filter)
+            autopilot["btc_threshold"] = float(new_btc_thresh)
+            autopilot["sector_rotation"] = bool(new_sector)
+            autopilot["sentiment_override"] = bool(new_sentiment)
             save_autopilot(autopilot)
             st.success("Saved!")
             st.rerun()
+
+    # Market Status mini-panel
+    with st.expander("📡 Market Status"):
+        msc1, msc2 = st.columns(2)
+        with msc1:
+            try:
+                btc_now = check_btc_health()
+                if btc_now > 0:
+                    msc1.metric("BTC 24h", "+" + str(round(btc_now, 2)) + "%", delta="Bullish 🟢")
+                elif btc_now > autopilot.get("btc_threshold", -3.0):
+                    msc1.metric("BTC 24h", str(round(btc_now, 2)) + "%", delta="Caution 🟡")
+                else:
+                    msc1.metric("BTC 24h", str(round(btc_now, 2)) + "%", delta="DANGER 🔴")
+            except:
+                msc1.metric("BTC 24h", "N/A")
+        with msc2:
+            try:
+                fg_now = get_fear_greed()
+                if fg_now < 25:
+                    label = "Extreme Fear 😨"
+                elif fg_now < 45:
+                    label = "Fear 😟"
+                elif fg_now < 55:
+                    label = "Neutral 😐"
+                elif fg_now < 75:
+                    label = "Greed 😏"
+                else:
+                    label = "Extreme Greed 🤑"
+                msc2.metric("Fear & Greed", str(fg_now) + "/100", delta=label)
+            except:
+                msc2.metric("Fear & Greed", "N/A")
 
     # Status row
     aps1, aps2, aps3, aps4 = st.columns(4)
@@ -1640,7 +1721,28 @@ with tab5:
             cfg["log"] = cfg["log"][:30]
             save_autopilot(cfg)
             return {"action": "skipped", "reason": "daily limit"}
-        # Scan top 20
+        # BTC crash filter
+        if cfg.get("btc_filter", True):
+            btc_change = check_btc_health()
+            if btc_change < cfg.get("btc_threshold", -3.0):
+                cfg["log"].insert(0, str(datetime.now())[:19] + " · 🟠 BTC FILTER: BTC down " + str(round(btc_change, 2)) + "% — pausing new buys")
+                cfg["last_scan"] = datetime.now().isoformat()
+                cfg["log"] = cfg["log"][:30]
+                save_autopilot(cfg)
+                send_telegram("🛡️ <b>BTC CRASH FILTER ACTIVE</b>\nBTC is down " + str(round(btc_change, 2)) + "% in 24h.\nPausing new buys until BTC stabilizes.")
+                return {"action": "skipped", "reason": "BTC dumping " + str(round(btc_change, 2)) + "%"}
+        # Sentiment override — adjust effective bull score requirement
+        effective_min_bull = cfg["min_bull_score"]
+        sentiment_note = ""
+        if cfg.get("sentiment_override", True):
+            fg = get_fear_greed()
+            if fg < 20:
+                effective_min_bull = max(cfg["min_bull_score"] - 2, 7)
+                sentiment_note = " (😨 extreme fear: bull threshold lowered to " + str(effective_min_bull) + ")"
+            elif fg > 80:
+                effective_min_bull = cfg["min_bull_score"] + 2
+                sentiment_note = " (🤑 extreme greed: bull threshold raised to " + str(effective_min_bull) + ")"
+        # Scan
         results = []
         coin_items = list(COINS.items())
         for coin_name_a, coin_id_a in coin_items:
@@ -1652,15 +1754,26 @@ with tab5:
                 r["coin_id"] = coin_id_a
                 results.append(r)
             time.sleep(0.4)
-        # Filter
         candidates = [r for r in results
                       if r["signal"] == "STRONG BUY"
-                      and r["bull"] >= cfg["min_bull_score"]
+                      and r["bull"] >= effective_min_bull
                       and r["confidence"] >= cfg["min_confidence"]]
+        # Sector rotation boost
+        if cfg.get("sector_rotation", True):
+            sectors = detect_hot_sectors(results)
+            if sectors:
+                top_sector = max(sectors.items(), key=lambda x: x[1]["signals"])
+                if top_sector[1]["signals"] >= 2:
+                    for c in candidates:
+                        cat = categorize_coin(c["coin_id"])
+                        if cat == top_sector[0]:
+                            c["sector_boost"] = True
+                            c["bull"] += 2
+                    cfg["log"].insert(0, str(datetime.now())[:19] + " · 🔥 Hot sector: " + top_sector[0] + " (" + str(top_sector[1]["signals"]) + " signals)")
         insights_now = generate_trade_insights(paper_d.get("trades", []))
         if insights_now:
             candidates = apply_insights_to_picks(candidates, insights_now)
-            candidates = [c for c in candidates if c.get("adjusted_score", c["bull"]) >= cfg["min_bull_score"]]
+            candidates = [c for c in candidates if c.get("adjusted_score", c["bull"]) >= effective_min_bull]
         else:
             candidates.sort(key=lambda x: (x["bull"], x["confidence"]), reverse=True)
         slots_available = min(
@@ -2113,6 +2226,46 @@ with tab5:
         drawdown_from_peak = ((running_balance - peak) / peak) * 100
         if drawdown_from_peak < -5:
             st.warning("📉 Currently " + str(round(abs(drawdown_from_peak), 2)) + "% below peak of $" + str(round(peak, 2)))
+
+        # ── Calendar Heatmap ─────────────────────────────────────────────
+        st.markdown("**📅 Daily P&L Calendar**")
+        daily_pnl = {}
+        for t in sell_trades_eq:
+            day = t["date"][:10]
+            daily_pnl[day] = daily_pnl.get(day, 0) + t["profit_usd"]
+        if daily_pnl:
+            sorted_days = sorted(daily_pnl.keys())
+            cal_dates = sorted_days
+            cal_values = [daily_pnl[d] for d in sorted_days]
+            cal_colors = []
+            for v in cal_values:
+                if v >= 50: cal_colors.append("#16a34a")
+                elif v > 0: cal_colors.append("#86efac")
+                elif v == 0: cal_colors.append("#6b7280")
+                elif v > -50: cal_colors.append("#fca5a5")
+                else: cal_colors.append("#dc2626")
+            cal_fig = go.Figure(data=[go.Bar(
+                x=cal_dates, y=cal_values,
+                marker_color=cal_colors,
+                text=["+$" + str(round(v, 2)) if v >= 0 else "-$" + str(round(abs(v), 2)) for v in cal_values],
+                textposition="outside",
+            )])
+            cal_fig.update_layout(
+                template="plotly_dark", height=300,
+                yaxis_title="Daily P&L ($)", xaxis_title="",
+                showlegend=False, margin=dict(l=20, r=20, t=20, b=20),
+            )
+            cal_fig.add_hline(y=0, line_color="gray", line_width=1)
+            st.plotly_chart(cal_fig, use_container_width=True)
+            green_days = len([v for v in cal_values if v > 0])
+            red_days = len([v for v in cal_values if v < 0])
+            best_day = max(daily_pnl.items(), key=lambda x: x[1])
+            worst_day = min(daily_pnl.items(), key=lambda x: x[1])
+            cal_c1, cal_c2, cal_c3, cal_c4 = st.columns(4)
+            cal_c1.metric("🟢 Green Days", green_days)
+            cal_c2.metric("🔴 Red Days", red_days)
+            cal_c3.metric("Best Day", best_day[0][5:], delta="+$" + str(round(best_day[1], 2)))
+            cal_c4.metric("Worst Day", worst_day[0][5:], delta=("+" if worst_day[1] >= 0 else "") + "$" + str(round(worst_day[1], 2)))
     else:
         st.info("Equity curve will appear after your first closed trade.")
 
