@@ -60,10 +60,15 @@ STABLECOIN_IDS = {
     "gemini-dollar", "paxos-standard", "neutrino", "fei-usd", "liquity-usd",
     "ethena-usde", "falcon-usd", "usds", "first-digital-usd", "paypal-usd",
     "tether-eurt", "euro-coin", "stasis-eurs", "bridged-usdc-polygon-pos-bridge",
+    "usd1-wlfi", "usd1", "ondo-us-dollar-yield", "figure-heloc", "rain",
+    "blackrock-usd-institutional-digital-liquidity-fund", "mountain-protocol-usdm",
+    "savings-dai", "compound-usdt", "compound-usdc", "aave-usdc", "aave-usdt",
 }
 STABLECOIN_SYMBOLS = {"usdt", "usdc", "dai", "busd", "tusd", "frax", "usdd", "gusd",
                       "usdp", "usdn", "fei", "lusd", "usde", "usdf", "usds", "pyusd",
-                      "eurt", "eurc", "eurs", "rain"}
+                      "eurt", "eurc", "eurs", "rain", "usd1", "usdy", "figr_heloc",
+                      "buidl", "usdm", "sdai", "cusdt", "cusdc", "ausdc", "ausdt",
+                      "wsteth", "usdtb"}
 
 def get_top_coins(limit=75):
     """Fetch top coins by market cap from CoinGecko, filtering stablecoins. Cache for 1 hour."""
@@ -87,7 +92,14 @@ def get_top_coins(limit=75):
         for item in data:
             cid = item["id"]
             symbol = item["symbol"].lower()
+            name_lower = item["name"].lower()
             if cid in STABLECOIN_IDS or symbol in STABLECOIN_SYMBOLS:
+                continue
+            # Pattern-based filter: catch any stablecoin/yield token we missed
+            stable_patterns = ["usd", "yield", "heloc", "dollar", "stable", "euro", "stsui"]
+            if any(p in symbol for p in stable_patterns):
+                continue
+            if any(p in name_lower for p in ["us dollar", "stable", "yield", "heloc"]):
                 continue
             name = item["name"] + " (" + item["symbol"].upper() + ")"
             coins[name] = cid
