@@ -140,16 +140,53 @@ def save_journal(trades):
     with open(JOURNAL_FILE, "w") as f:
         json.dump(trades, f, indent=2)
 
+SUPABASE_URL = st.secrets.get("SUPABASE_URL", "")
+SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "")
+
+def supabase_get(table, row_id):
+    """Fetch a row from Supabase by id."""
+    try:
+        url = SUPABASE_URL + "/rest/v1/" + table + "?id=eq." + row_id + "&select=data"
+        res = requests.get(url, headers={
+            "apikey": SUPABASE_KEY,
+            "Authorization": "Bearer " + SUPABASE_KEY,
+        }, timeout=10)
+        rows = res.json()
+        if rows and len(rows) > 0:
+            return rows[0]["data"]
+        return None
+    except:
+        return None
+
+def supabase_set(table, row_id, data):
+    """Upsert a row in Supabase."""
+    try:
+        url = SUPABASE_URL + "/rest/v1/" + table
+        requests.post(url, headers={
+            "apikey": SUPABASE_KEY,
+            "Authorization": "Bearer " + SUPABASE_KEY,
+            "Content-Type": "application/json",
+            "Prefer": "resolution=merge-duplicates",
+        }, json={"id": row_id, "data": data}, timeout=10)
+    except:
+        pass
+
 def load_paper_trades():
+    if SUPABASE_URL and SUPABASE_KEY:
+        data = supabase_get("paper_trades", "main")
+        if data:
+            return data
     if os.path.exists(PAPER_FILE):
         try:
             with open(PAPER_FILE, "r") as f:
                 return json.load(f)
         except:
-            return {"balance": 10000.0, "trades": [], "positions": {}}
+            pass
     return {"balance": 10000.0, "trades": [], "positions": {}}
 
 def save_paper_trades(data):
+    if SUPABASE_URL and SUPABASE_KEY:
+        supabase_set("paper_trades", "main", data)
     with open(PAPER_FILE, "w") as f:
         json.dump(data, f, indent=2)
 
@@ -623,6 +660,8 @@ def generate_trade_insights(trades):
         if lv_wr < 40:
             insights["tips"].append("Low volume trades lose often. Skip coins with volume < 0.8x average.")
     try:
+        if SUPABASE_URL and SUPABASE_KEY:
+            supabase_set("trade_insights", "main", insights)
         with open(TRADE_INSIGHTS_FILE, "w") as f:
             json.dump(insights, f)
     except:
@@ -1584,9 +1623,13 @@ with tab5:
             "trades_today": [],
             "log": [],
         }
-        if os.path.exists(AUTOPILOT_FILE):
+        if SUPABASE_URL and SUPABASE_KEY:
+            saved = supabase_get("autopilot_config", "main")
+            if saved:
+                default.update(saved)
+        elif os.path.exists("autopilot_config.json"):
             try:
-                with open(AUTOPILOT_FILE, "r") as f:
+                with open("autopilot_config.json", "r") as f:
                     saved = json.load(f)
                 default.update(saved)
             except:
@@ -1596,7 +1639,9 @@ with tab5:
         return default
 
     def save_autopilot(cfg):
-        with open(AUTOPILOT_FILE, "w") as f:
+        if SUPABASE_URL and SUPABASE_KEY:
+            supabase_set("autopilot_config", "main", cfg)
+        with open("autopilot_config.json", "w") as f:
             json.dump(cfg, f)
 
     autopilot = load_autopilot()
