@@ -339,6 +339,44 @@ def run_backtest(prices, initial_capital=100, stop_loss_pct=5, take_profit_pct=1
         "max_drawdown": max_drawdown, "equity_curve": equity_curve, "trades": trades,
     }
 
+def apply_insights_to_picks(picks, insights):
+    """Re-rank and filter picks based on learned insights."""
+    if not insights:
+        return picks
+    scored_picks = []
+    for p in picks:
+        score = p["bull"]
+        cat = categorize_coin(p["coin_id"])
+        if cat in insights.get("avoid_categories", []):
+            score -= 5
+            p["insight_warning"] = "⚠️ You historically lose on " + cat + " coins"
+        if cat in insights.get("prefer_categories", []):
+            score += 3
+            p["insight_boost"] = "✅ " + cat + " is your best category"
+        rsi = p.get("rsi", 50)
+        for rng in insights.get("prefer_rsi_ranges", []):
+            parts = rng.split("-")
+            low, high = int(parts[0]), int(parts[1]) if len(parts) > 1 else 100
+            if low <= rsi <= high:
+                score += 2
+                p["insight_boost"] = p.get("insight_boost", "") + " · RSI in your winning range"
+        for rng in insights.get("avoid_rsi_ranges", []):
+            parts = rng.split("-")
+            low, high = int(parts[0]), int(parts[1]) if len(parts) > 1 else 100
+            if low <= rsi <= high:
+                score -= 3
+                p["insight_warning"] = p.get("insight_warning", "") + " · RSI in your losing range"
+        if p.get("volume_ratio", 1) > 1.5:
+            high_vol = insights.get("volume_stats", {}).get("high", {})
+            if high_vol.get("w", 0) + high_vol.get("l", 0) >= 3:
+                hv_wr = high_vol["w"] / (high_vol["w"] + high_vol["l"]) * 100
+                if hv_wr > 60:
+                    score += 2
+        p["adjusted_score"] = score
+        scored_picks.append(p)
+    scored_picks.sort(key=lambda x: x["adjusted_score"], reverse=True)
+    return scored_picks
+
 def check_btc_health():
     """Returns BTC's 24h change %. Used as a market filter."""
     try:
