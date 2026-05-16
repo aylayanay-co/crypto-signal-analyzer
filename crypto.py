@@ -1794,6 +1794,22 @@ with tab5:
     else:
         aps3.metric("Last Auto-Scan", "Never")
         aps4.metric("Next Scan", "On enable")
+    # Show streak and blocked coins
+    ap_sell_trades = [t for t in paper_trades if t["type"] == "SELL"]
+    ap_sorted = sorted(ap_sell_trades, key=lambda x: x["date"], reverse=True)
+    ap_streak = 0
+    for t in ap_sorted:
+        if t["profit_usd"] <= 0: ap_streak += 1
+        else: break
+    ap_loss_counts = {}
+    for t in ap_sell_trades:
+        if t["profit_usd"] <= 0:
+            ap_loss_counts[t["coin"]] = ap_loss_counts.get(t["coin"], 0) + 1
+    ap_blocked = [c for c, n in ap_loss_counts.items() if n >= 2]
+    if ap_streak >= 2:
+        st.warning("🔴 Current losing streak: **" + str(ap_streak) + "** · " + ("Bot will PAUSE new buys (cooldown active)" if ap_streak >= 3 else "1 more loss triggers 24h cooldown"))
+    if ap_blocked:
+        st.info("🚫 Re-entry blocked coins: **" + ", ".join(ap_blocked) + "** (lost 2+ times)")
 
     # Run logic
     def run_autopilot_scan():
@@ -1866,6 +1882,35 @@ with tab5:
                             c["bull"] += 2
                     cfg["log"].insert(0, str(datetime.now())[:19] + " · 🔥 Hot sector: " + top_sector[0] + " (" + str(top_sector[1]["signals"]) + " signals)")
         insights_now = generate_trade_insights(paper_d.get("trades", []))
+        # ── Losing Streak Cooldown ────────────────────────────────────────
+        sell_trades_ap = [t for t in paper_d.get("trades", []) if t["type"] == "SELL"]
+        sorted_ap = sorted(sell_trades_ap, key=lambda x: x["date"], reverse=True)
+        consecutive_losses = 0
+        for t in sorted_ap:
+            if t["profit_usd"] <= 0:
+                consecutive_losses += 1
+            else:
+                break
+        if consecutive_losses >= 3:
+            cfg["log"].insert(0, str(datetime.now())[:19] + " · 🛑 COOLDOWN: " + str(consecutive_losses) + " losses in a row — pausing buys for 24h")
+            cfg["last_scan"] = datetime.now().isoformat()
+            cfg["log"] = cfg["log"][:30]
+            save_autopilot(cfg)
+            send_telegram("🛑 <b>LOSING STREAK COOLDOWN</b>\n" + str(consecutive_losses) + " losses in a row.\nPausing new buys for 24 hours to protect your account.")
+            # Still run signal sells but no new buys
+            candidates = []
+        # ── Re-Entry Blocker ──────────────────────────────────────────────
+        coin_loss_counts = {}
+        for t in sell_trades_ap:
+            if t["profit_usd"] <= 0:
+                coin_loss_counts[t["coin"]] = coin_loss_counts.get(t["coin"], 0) + 1
+        blocked_coins = {coin for coin, count in coin_loss_counts.items() if count >= 2}
+        if blocked_coins:
+            before = len(candidates)
+            candidates = [c for c in candidates if c["coin_name"] not in blocked_coins]
+            blocked_count = before - len(candidates)
+            if blocked_count > 0:
+                cfg["log"].insert(0, str(datetime.now())[:19] + " · 🚫 Re-entry blocker: skipped " + str(blocked_count) + " coins (" + ", ".join(blocked_coins) + ")")
         if insights_now:
             candidates = apply_insights_to_picks(candidates, insights_now)
             candidates = [c for c in candidates if c.get("adjusted_score", c["bull"]) >= effective_min_bull]
