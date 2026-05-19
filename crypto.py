@@ -1807,7 +1807,16 @@ with tab5:
             ap_loss_counts[t["coin"]] = ap_loss_counts.get(t["coin"], 0) + 1
     ap_blocked = [c for c, n in ap_loss_counts.items() if n >= 2]
     if ap_streak >= 2:
-        st.warning("🔴 Current losing streak: **" + str(ap_streak) + "** · " + ("Bot will PAUSE new buys (cooldown active)" if ap_streak >= 3 else "1 more loss triggers 24h cooldown"))
+        cooldown_start = autopilot.get("cooldown_start")
+        if cooldown_start and ap_streak >= 3:
+            hours_passed = (datetime.now() - datetime.fromisoformat(cooldown_start)).total_seconds() / 3600
+            hours_left = max(0, 24 - hours_passed)
+            if hours_left > 0:
+                st.error("🛑 **COOLDOWN ACTIVE** · " + str(ap_streak) + " losses in a row · Resumes in **" + str(round(hours_left, 1)) + "h**")
+            else:
+                st.success("✅ Cooldown period over — bot will resume next scan")
+        else:
+            st.warning("🔴 Current losing streak: **" + str(ap_streak) + "** · " + ("1 more loss triggers 24h cooldown" if ap_streak == 2 else "Cooldown will activate next scan"))
     if ap_blocked:
         st.info("🚫 Re-entry blocked coins: **" + ", ".join(ap_blocked) + "** (lost 2+ times)")
 
@@ -1891,13 +1900,26 @@ with tab5:
                 consecutive_losses += 1
             else:
                 break
+        cooldown_active = False
         if consecutive_losses >= 3:
-            cfg["log"].insert(0, str(datetime.now())[:19] + " · 🛑 COOLDOWN: " + str(consecutive_losses) + " losses in a row — pausing buys for 24h")
-            cfg["last_scan"] = datetime.now().isoformat()
-            cfg["log"] = cfg["log"][:30]
-            save_autopilot(cfg)
-            send_telegram("🛑 <b>LOSING STREAK COOLDOWN</b>\n" + str(consecutive_losses) + " losses in a row.\nPausing new buys for 24 hours to protect your account.")
-            # Still run signal sells but no new buys
+            cooldown_start = cfg.get("cooldown_start")
+            if cooldown_start:
+                cooldown_dt = datetime.fromisoformat(cooldown_start)
+                hours_passed = (datetime.now() - cooldown_dt).total_seconds() / 3600
+                if hours_passed < 24:
+                    cooldown_active = True
+                    cfg["log"].insert(0, str(datetime.now())[:19] + " · 🛑 COOLDOWN ACTIVE: " + str(round(24 - hours_passed, 1)) + "h remaining")
+                else:
+                    cfg["cooldown_start"] = None
+                    cfg["log"].insert(0, str(datetime.now())[:19] + " · ✅ Cooldown lifted — resuming trading")
+            else:
+                cfg["cooldown_start"] = datetime.now().isoformat()
+                cooldown_active = True
+                cfg["log"].insert(0, str(datetime.now())[:19] + " · 🛑 COOLDOWN: " + str(consecutive_losses) + " losses in a row — pausing buys for 24h")
+                send_telegram("🛑 <b>LOSING STREAK COOLDOWN</b>\n" + str(consecutive_losses) + " losses in a row.\nPausing new buys for 24 hours to protect your account.")
+        else:
+            cfg["cooldown_start"] = None
+        if cooldown_active:
             candidates = []
         # ── Re-Entry Blocker ──────────────────────────────────────────────
         coin_loss_counts = {}
