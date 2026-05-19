@@ -1796,7 +1796,16 @@ with tab5:
         aps4.metric("Next Scan", "On enable")
     # Show streak and blocked coins
     ap_sell_trades = [t for t in paper_trades if t["type"] == "SELL"]
-    ap_sorted = sorted(ap_sell_trades, key=lambda x: x["date"], reverse=True)
+    ap_cutoff = datetime.now() - timedelta(hours=48)
+    ap_recent = []
+    for t in ap_sell_trades:
+        try:
+            t_date = datetime.fromisoformat(t["date"])
+            if t_date >= ap_cutoff:
+                ap_recent.append(t)
+        except:
+            pass
+    ap_sorted = sorted(ap_recent, key=lambda x: x["date"], reverse=True)
     ap_streak = 0
     for t in ap_sorted:
         if t["profit_usd"] <= 0: ap_streak += 1
@@ -1896,9 +1905,18 @@ with tab5:
                             c["bull"] += 2
                     cfg["log"].insert(0, str(datetime.now())[:19] + " · 🔥 Hot sector: " + top_sector[0] + " (" + str(top_sector[1]["signals"]) + " signals)")
         insights_now = generate_trade_insights(paper_d.get("trades", []))
-        # ── Losing Streak Cooldown ────────────────────────────────────────
+        # ── Losing Streak Cooldown (only count last 48 hours) ─────────────
         sell_trades_ap = [t for t in paper_d.get("trades", []) if t["type"] == "SELL"]
-        sorted_ap = sorted(sell_trades_ap, key=lambda x: x["date"], reverse=True)
+        cutoff = datetime.now() - timedelta(hours=48)
+        recent_sells = []
+        for t in sell_trades_ap:
+            try:
+                t_date = datetime.fromisoformat(t["date"])
+                if t_date >= cutoff:
+                    recent_sells.append(t)
+            except:
+                pass
+        sorted_ap = sorted(recent_sells, key=lambda x: x["date"], reverse=True)
         consecutive_losses = 0
         for t in sorted_ap:
             if t["profit_usd"] <= 0:
