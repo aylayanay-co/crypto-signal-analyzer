@@ -70,7 +70,7 @@ STABLECOIN_SYMBOLS = {"usdt", "usdc", "dai", "busd", "tusd", "frax", "usdd", "gu
                       "buidl", "usdm", "sdai", "cusdt", "cusdc", "ausdc", "ausdt",
                       "wsteth", "usdtb"}
 
-def get_top_coins(limit=75):
+def get_top_coins(limit=100):
     """Fetch top coins by market cap from CoinGecko, filtering stablecoins. Cache for 1 hour."""
     cache = {}
     if os.path.exists(TOP_COINS_CACHE_FILE):
