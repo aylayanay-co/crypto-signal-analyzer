@@ -550,7 +550,7 @@ st.caption("Live · Scanner · TA · Sentiment · Risk Mgmt · Backtest · Teleg
 
 # Load top coins (cached hourly)
 with st.spinner("Loading coin list..."):
-    COINS, COIN_KEYWORDS_FULL = get_top_coins(50)
+    COINS, COIN_KEYWORDS_FULL = get_top_coins(100)
 
 st.sidebar.header("⚠️ Risk Settings")
 account_balance = st.sidebar.number_input("Account Balance ($)", min_value=10.0, value=1000.0, step=100.0)
