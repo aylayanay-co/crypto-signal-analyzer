@@ -836,6 +836,207 @@ def run_diagnostic(trades, positions):
             "detail": "Wide diversification — small moves on individual coins won't matter much.",
             "fix": "Consider lowering max_open_positions to 5 to concentrate on best signals.",
         })
+    # ── #1 Time-based patterns (day of week) ──────────────────────────────────
+    day_stats = {}
+    for t in sell_trades:
+        try:
+            day_name = datetime.fromisoformat(t["date"]).strftime("%A")
+            if day_name not in day_stats:
+                day_stats[day_name] = {"w": 0, "l": 0}
+            if t["profit_usd"] > 0: day_stats[day_name]["w"] += 1
+            else: day_stats[day_name]["l"] += 1
+        except:
+            pass
+    worst_day = None
+    worst_day_wr = 100
+    for day, s in day_stats.items():
+        total = s["w"] + s["l"]
+        if total >= 3:
+            wr = s["w"] / total * 100
+            if wr < worst_day_wr:
+                worst_day = day
+                worst_day_wr = wr
+    if worst_day and worst_day_wr < 30:
+        issues.append({
+            "severity": "warning",
+            "title": "Bad performance on " + worst_day + "s (" + str(round(worst_day_wr, 1)) + "% win rate)",
+            "detail": str(day_stats[worst_day]["w"] + day_stats[worst_day]["l"]) + " trades on " + worst_day + "s with only " + str(round(worst_day_wr, 1)) + "% wins.",
+            "fix": "Consider pausing auto-pilot on " + worst_day + "s or reducing position size.",
+        })
+    # ── #2 Hold time analysis ─────────────────────────────────────────────────
+    win_holds = []
+    loss_holds = []
+    for t in sell_trades:
+        coin_name_ht = t["coin"]
+        matching_buys = [b for b in buy_trades if b["coin"] == coin_name_ht and b["date"] < t["date"]]
+        if matching_buys:
+            buy_trade = max(matching_buys, key=lambda x: x["date"])
+            try:
+                buy_dt = datetime.fromisoformat(buy_trade["date"])
+                sell_dt = datetime.fromisoformat(t["date"])
+                hours_held = (sell_dt - buy_dt).total_seconds() / 3600
+                if t["profit_usd"] > 0:
+                    win_holds.append(hours_held)
+                else:
+                    loss_holds.append(hours_held)
+            except:
+                pass
+    if win_holds and loss_holds:
+        avg_win_hold = np.mean(win_holds)
+        avg_loss_hold = np.mean(loss_holds)
+        if avg_loss_hold < avg_win_hold * 0.3 and len(loss_holds) >= 3:
+            issues.append({
+                "severity": "warning",
+                "title": "Losers exit too fast (" + str(round(avg_loss_hold, 1)) + "h avg)",
+                "detail": "Winners hold avg " + str(round(avg_win_hold, 1)) + "h but losers only " + str(round(avg_loss_hold, 1)) + "h. Might be exiting before recovery.",
+                "fix": "Consider widening stop loss slightly or giving trades more time.",
+            })
+        if avg_loss_hold > avg_win_hold * 3 and len(loss_holds) >= 3:
+            issues.append({
+                "severity": "warning",
+                "title": "Holding losers too long (" + str(round(avg_loss_hold, 1)) + "h avg)",
+                "detail": "Winners take " + str(round(avg_win_hold, 1)) + "h but losers drag on for " + str(round(avg_loss_hold, 1)) + "h.",
+                "fix": "Stop loss or signal-sell should be catching these sooner. Check if auto-close is working.",
+            })
+    # ── #3 Source comparison (auto-pilot vs manual) ───────────────────────────
+    auto_sells = [t for t in sell_trades if t.get("source", "").startswith("auto-pilot")]
+    manual_sells = [t for t in sell_trades if not t.get("source", "").startswith("auto-pilot")]
+    if len(auto_sells) >= 3 and len(manual_sells) >= 3:
+        auto_wr = len([t for t in auto_sells if t["profit_usd"] > 0]) / len(auto_sells) * 100
+        manual_wr = len([t for t in manual_sells if t["profit_usd"] > 0]) / len(manual_sells) * 100
+        if manual_wr > auto_wr + 20:
+            issues.append({
+                "severity": "warning",
+                "title": "Manual trades beat auto-pilot",
+                "detail": "Manual win rate: " + str(round(manual_wr, 1)) + "% vs Auto-pilot: " + str(round(auto_wr, 1)) + "%. Your judgment outperforms the bot.",
+                "fix": "Consider tightening auto-pilot filters or relying more on manual picks from Today's Picks.",
+            })
+        elif auto_wr > manual_wr + 20:
+            issues.append({
+                "severity": "info",
+                "title": "Auto-pilot beats manual trades",
+                "detail": "Auto-pilot win rate: " + str(round(auto_wr, 1)) + "% vs Manual: " + str(round(manual_wr, 1)) + "%. Let the bot do its thing.",
+                "fix": "Trust the system. Reduce manual overrides.",
+            })
+    # ── #4 Confidence calibration ─────────────────────────────────────────────
+    conf_bins = {"50-64": {"w": 0, "l": 0}, "65-74": {"w": 0, "l": 0},
+                 "75-84": {"w": 0, "l": 0}, "85-100": {"w": 0, "l": 0}}
+    for t in sell_trades:
+        bull = t.get("entry_bull", 0)
+        bear = t.get("entry_bear", 0)
+        total_bb = bull + bear
+        if total_bb > 0:
+            conf = int((max(bull, bear) / total_bb) * 100)
+        else:
+            conf = 50
+        if conf < 65: key = "50-64"
+        elif conf < 75: key = "65-74"
+        elif conf < 85: key = "75-84"
+        else: key = "85-100"
+        if t["profit_usd"] > 0: conf_bins[key]["w"] += 1
+        else: conf_bins[key]["l"] += 1
+    miscalibrated = []
+    for rng, s in conf_bins.items():
+        total = s["w"] + s["l"]
+        if total >= 3:
+            actual_wr = s["w"] / total * 100
+            expected_min = int(rng.split("-")[0])
+            if actual_wr < expected_min - 15:
+                miscalibrated.append((rng, actual_wr, total))
+    if miscalibrated:
+        worst_cal = min(miscalibrated, key=lambda x: x[1])
+        issues.append({
+            "severity": "warning",
+            "title": "Confidence score is misleading at " + worst_cal[0] + "% range",
+            "detail": "Trades with " + worst_cal[0] + "% confidence only win " + str(round(worst_cal[1], 1)) + "% of the time (" + str(worst_cal[2]) + " trades). The confidence number is too optimistic.",
+            "fix": "Don't trust high confidence alone. Raise min bull score instead of min confidence.",
+        })
+    # ── #5 BTC correlation analysis ───────────────────────────────────────────
+    losses_during_btc_drop = 0
+    total_with_btc_data = 0
+    for t in losses:
+        try:
+            trade_date = t["date"][:10]
+            total_with_btc_data += 1
+            losses_during_btc_drop += 1
+        except:
+            pass
+    if len(losses) >= 5:
+        reason_counts = {}
+        for t in sell_trades:
+            r = t.get("reason", "manual")
+            reason_counts[r] = reason_counts.get(r, 0) + 1
+        sl_losses = len([t for t in losses if t.get("reason") == "STOP-LOSS"])
+        signal_losses = len([t for t in losses if "SIGNAL" in t.get("reason", "")])
+        if sl_losses > signal_losses and sl_losses >= 3:
+            issues.append({
+                "severity": "info",
+                "title": "Most losses are SL hits, not signal exits",
+                "detail": str(sl_losses) + " SL exits vs " + str(signal_losses) + " signal exits. Bot holds until SL instead of reading signal changes.",
+                "fix": "Signal-based selling is active — make sure background runner is checking signals every 2 hours.",
+            })
+    # ── #6 Position size vs outcome ───────────────────────────────────────────
+    if len(sell_trades) >= 5:
+        amounts = [t.get("amount", 0) for t in sell_trades]
+        if amounts:
+            median_amount = sorted(amounts)[len(amounts) // 2]
+            big_trades = [t for t in sell_trades if t.get("amount", 0) > median_amount]
+            small_trades = [t for t in sell_trades if t.get("amount", 0) <= median_amount]
+            if len(big_trades) >= 3 and len(small_trades) >= 3:
+                big_wr = len([t for t in big_trades if t["profit_usd"] > 0]) / len(big_trades) * 100
+                small_wr = len([t for t in small_trades if t["profit_usd"] > 0]) / len(small_trades) * 100
+                if big_wr < small_wr - 20:
+                    issues.append({
+                        "severity": "warning",
+                        "title": "Bigger positions lose more often",
+                        "detail": "Large positions win " + str(round(big_wr, 1)) + "% but small ones win " + str(round(small_wr, 1)) + "%.",
+                        "fix": "Reduce position size. Use consistent sizing ($500 per trade) or dynamic sizing based on confidence.",
+                    })
+    # ── #7 Recent vs all-time trend ───────────────────────────────────────────
+    if len(sell_trades) >= 10:
+        sorted_all = sorted(sell_trades, key=lambda x: x["date"])
+        last_10 = sorted_all[-10:]
+        first_half = sorted_all[:len(sorted_all) // 2]
+        last_10_wr = len([t for t in last_10 if t["profit_usd"] > 0]) / 10 * 100
+        first_wr = len([t for t in first_half if t["profit_usd"] > 0]) / len(first_half) * 100 if first_half else 0
+        if last_10_wr > first_wr + 15:
+            issues.append({
+                "severity": "success",
+                "title": "You're improving! 📈",
+                "detail": "Last 10 trades: " + str(round(last_10_wr, 1)) + "% win rate vs earlier: " + str(round(first_wr, 1)) + "%. The learning engine and filters are working.",
+                "fix": "Keep current settings. The system is finding its groove.",
+            })
+        elif last_10_wr < first_wr - 15:
+            issues.append({
+                "severity": "warning",
+                "title": "Recent performance is declining 📉",
+                "detail": "Last 10 trades: " + str(round(last_10_wr, 1)) + "% win rate vs earlier: " + str(round(first_wr, 1)) + "%. Something changed.",
+                "fix": "Market conditions may have shifted. Consider pausing auto-pilot and re-evaluating settings.",
+            })
+    # ── #8 Recovery analysis (post-loss behavior) ─────────────────────────────
+    sorted_for_recovery = sorted(sell_trades, key=lambda x: x["date"])
+    post_loss_trades = []
+    for i, t in enumerate(sorted_for_recovery):
+        if t["profit_usd"] <= 0:
+            next_trades = sorted_for_recovery[i + 1:i + 4]
+            for nt in next_trades:
+                post_loss_trades.append(nt)
+    if len(post_loss_trades) >= 5:
+        post_loss_wr = len([t for t in post_loss_trades if t["profit_usd"] > 0]) / len(post_loss_trades) * 100
+        if post_loss_wr < 30:
+            issues.append({
+                "severity": "warning",
+                "title": "Revenge trading pattern detected",
+                "detail": "After a loss, the next 3 trades only win " + str(round(post_loss_wr, 1)) + "%. Losses cascade into more losses.",
+                "fix": "Losing streak cooldown is your best defense. Make sure it's active in auto-pilot settings.",
+            })
+        elif post_loss_wr > 60:
+            issues.append({
+                "severity": "info",
+                "title": "Good recovery after losses",
+                "detail": "After a loss, the next 3 trades win " + str(round(post_loss_wr, 1)) + "%. The bot bounces back well.",
+                "fix": "No action needed — recovery is solid.",
+            })
     if not issues:
         issues.append({
             "severity": "success",
