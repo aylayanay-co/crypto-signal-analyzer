@@ -250,6 +250,41 @@ def main():
     if positions_to_close:
         supabase_set("paper_trades", "main", paper)
 
+    # ── Signal-based selling: check remaining held positions ──────────────────
+    print("\n--- Checking held positions for SELL signals ---")
+    signal_sold = []
+    for coin_name_held in list(paper["positions"].keys()):
+        coin_id_held = paper["positions"][coin_name_held].get("coin_id") or all_coins.get(coin_name_held)
+        if not coin_id_held:
+            continue
+        held_analysis = analyze_coin(coin_id_held)
+        if not held_analysis:
+            continue
+        if held_analysis["signal"] in ("SELL", "STRONG SELL"):
+            pos_held = paper["positions"][coin_name_held]
+            sell_px = held_analysis["price"]
+            sale_value = pos_held["coins"] * sell_px
+            profit_usd = sale_value - pos_held["cost"]
+            profit_pct = (profit_usd / pos_held["cost"]) * 100
+            paper["balance"] += sale_value
+            paper["trades"].append({
+                "type": "SELL", "coin": coin_name_held, "price": sell_px,
+                "amount": sale_value, "coins": pos_held["coins"],
+                "date": str(datetime.now())[:19],
+                "profit_usd": profit_usd, "profit_pct": profit_pct,
+                "reason": "SIGNAL-SELL (" + held_analysis["signal"] + ")",
+                "source": "auto-pilot-bg",
+            })
+            del paper["positions"][coin_name_held]
+            signal_sold.append(coin_name_held)
+            emoji = "✅" if profit_usd >= 0 else "❌"
+            send_telegram("🤖 <b>SIGNAL SELL " + emoji + "</b>\n" + coin_name_held + " · " + held_analysis["signal"] + "\nPrice: $" + str(round(sell_px, 4)) + "\nP&L: " + ("+" if profit_usd >= 0 else "") + "$" + str(round(profit_usd, 2)) + " (" + ("+" if profit_pct >= 0 else "") + str(round(profit_pct, 2)) + "%)")
+            print("SIGNAL SOLD:", coin_name_held, held_analysis["signal"], "P&L:", profit_usd)
+        time.sleep(0.4)
+    if signal_sold:
+        supabase_set("paper_trades", "main", paper)
+        held = set(paper["positions"].keys())
+
     # ── Check filters ─────────────────────────────────────────────────────────
     if cfg.get("btc_filter", True):
         btc_change = check_btc_health()
