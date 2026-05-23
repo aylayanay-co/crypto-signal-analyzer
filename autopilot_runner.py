@@ -193,12 +193,13 @@ def main():
 
     # ── First: check open positions for SL/TP/trailing ────────────────────────
     print("\n--- Checking open positions for SL/TP ---")
+    # Pre-fetch coin list for ID lookups
+    all_coins = get_top_coins(100)
     positions_to_close = []
     for coin_name_pos, pos in list(paper["positions"].items()):
-        # Need coin_id — store it or look it up
-        coin_id_pos = pos.get("coin_id")
+        coin_id_pos = pos.get("coin_id") or all_coins.get(coin_name_pos)
         if not coin_id_pos:
-            print("Skipping", coin_name_pos, "- no coin_id")
+            print("Skipping", coin_name_pos, "- no coin_id and not in top coins")
             continue
         try:
             url = "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids=" + coin_id_pos
@@ -312,7 +313,7 @@ def main():
 
     # ── Scan ──────────────────────────────────────────────────────────────────
     print("\n--- Scanning coins ---")
-    coins = get_top_coins(100)
+    coins = all_coins
     print("Got", len(coins), "coins to scan")
     results = []
     for coin_name, coin_id in coins.items():
