@@ -435,6 +435,55 @@ def quick_analyze_short(coin_id):
     except:
         return None
 
+def detect_box_breakout(prices, volumes):
+    """Detect Darvas box breakouts with volume confirmation.
+    Returns dict: {is_breakout, box_age_days, volume_spike, box_top, box_bottom}"""
+    if len(prices) < 20:
+        return None
+    try:
+        # Look back 30 days to find the box
+        recent = prices[-30:]
+        recent_vols = volumes[-30:]
+        current_price = recent[-1]
+        # Box is defined by the high/low of the consolidation before the current move
+        # Take the previous 20 days (excluding last 3) to identify the box
+        if len(recent) < 25:
+            consolidation = recent[:-3]
+            recent_vol_baseline = recent_vols[:-3]
+        else:
+            consolidation = recent[-25:-3]
+            recent_vol_baseline = recent_vols[-25:-3]
+        if not consolidation:
+            return None
+        box_top = max(consolidation)
+        box_bottom = min(consolidation)
+        box_range_pct = ((box_top - box_bottom) / box_bottom) * 100 if box_bottom > 0 else 100
+        # Box must be tight enough to count (under 20% range)
+        if box_range_pct > 20:
+            return {"is_breakout": False, "box_age_days": 0, "volume_spike": False,
+                    "box_top": box_top, "box_bottom": box_bottom, "wide_box": True}
+        # Breakout: current price is above box top by at least 1%
+        is_breakout = current_price > box_top * 1.01
+        # Box age: how many days has the price been in the box?
+        box_age = 0
+        for p in reversed(consolidation):
+            if box_bottom * 0.98 <= p <= box_top * 1.02:
+                box_age += 1
+            else:
+                break
+        # Volume spike on current candle
+        avg_vol_baseline = np.mean(recent_vol_baseline) if len(recent_vol_baseline) > 0 else 1
+        current_vol = recent_vols[-1]
+        vol_ratio = current_vol / avg_vol_baseline if avg_vol_baseline > 0 else 1
+        volume_spike = vol_ratio > 1.5
+        return {
+            "is_breakout": is_breakout, "box_age_days": box_age,
+            "volume_spike": volume_spike, "vol_ratio": vol_ratio,
+            "box_top": box_top, "box_bottom": box_bottom, "wide_box": False,
+        }
+    except:
+        return None
+
 def quick_analyze(coin_id, days=90, coin_keywords=None):
     if coin_keywords is None:
         coin_keywords = COIN_KEYWORDS
@@ -538,7 +587,7 @@ def quick_analyze(coin_id, days=90, coin_keywords=None):
             "price": current_price, "change_24h": change_24h, "signal": signal,
             "bull": bull, "bear": bear, "confidence": confidence,
             "rsi": latest["rsi"], "volume_ratio": volume_ratio,
-            "above_vwap": current_price > latest["vwap"], "success": True
+            "above_vwap": current_price > latest["vwap"], "success": True,
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
