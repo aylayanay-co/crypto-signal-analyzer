@@ -116,6 +116,38 @@ def get_fear_greed():
     except:
         return 50
 
+def detect_box_breakout(prices, volumes):
+    """Detect Darvas box breakouts."""
+    if len(prices) < 25:
+        return None
+    try:
+        recent = prices[-30:]
+        recent_vols = volumes[-30:]
+        current_price = recent[-1]
+        consolidation = recent[-25:-3] if len(recent) >= 25 else recent[:-3]
+        recent_vol_baseline = recent_vols[-25:-3] if len(recent_vols) >= 25 else recent_vols[:-3]
+        if not consolidation:
+            return None
+        box_top = max(consolidation)
+        box_bottom = min(consolidation)
+        box_range_pct = ((box_top - box_bottom) / box_bottom) * 100 if box_bottom > 0 else 100
+        if box_range_pct > 20:
+            return {"is_breakout": False, "box_age_days": 0, "volume_spike": False}
+        is_breakout = current_price > box_top * 1.01
+        box_age = 0
+        for p in reversed(consolidation):
+            if box_bottom * 0.98 <= p <= box_top * 1.02:
+                box_age += 1
+            else:
+                break
+        avg_vol_baseline = np.mean(recent_vol_baseline) if len(recent_vol_baseline) > 0 else 1
+        current_vol = recent_vols[-1]
+        vol_ratio = current_vol / avg_vol_baseline if avg_vol_baseline > 0 else 1
+        return {"is_breakout": is_breakout, "box_age_days": box_age,
+                "volume_spike": vol_ratio > 1.5}
+    except:
+        return None
+
 def analyze_coin(coin_id):
     try:
         hist_url = "https://api.coingecko.com/api/v3/coins/" + coin_id + "/market_chart?vs_currency=usd&days=90"
