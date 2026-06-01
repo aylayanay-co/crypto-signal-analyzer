@@ -100,6 +100,46 @@ def categorize_coin(coin_id):
     if coin_id in privacy: return "Privacy"
     return "Other"
 
+def get_fingerprint(trade):
+    return {
+        "rsi": trade.get("entry_rsi", 50),
+        "bull": trade.get("entry_bull", 0),
+        "bear": trade.get("entry_bear", 0),
+        "volume_ratio": trade.get("entry_volume_ratio", 1.0),
+        "category": trade.get("entry_category", "Other"),
+    }
+
+def fingerprint_similarity(fp_current, fp_past):
+    score = 100
+    rsi_diff = abs(fp_current.get("rsi", 50) - fp_past.get("rsi", 50))
+    score -= min(rsi_diff * 1.5, 30)
+    bull_diff = abs(fp_current.get("bull", 0) - fp_past.get("bull", 0))
+    score -= min(bull_diff * 3, 20)
+    vol_diff = abs(fp_current.get("volume_ratio", 1) - fp_past.get("volume_ratio", 1))
+    score -= min(vol_diff * 10, 20)
+    if fp_current.get("category") == fp_past.get("category"):
+        score += 10
+    else:
+        score -= 5
+    return max(0, min(100, score))
+
+def pattern_match_score(current_features, trades):
+    sell_trades = [t for t in trades if t["type"] == "SELL"]
+    wins = [t for t in sell_trades if t["profit_usd"] > 0]
+    losses = [t for t in sell_trades if t["profit_usd"] <= 0]
+    if len(wins) < 5:
+        return {"signal": "insufficient_data"}
+    win_sims = [fingerprint_similarity(current_features, get_fingerprint(w)) for w in wins]
+    loss_sims = [fingerprint_similarity(current_features, get_fingerprint(l)) for l in losses]
+    win_top3 = np.mean(sorted(win_sims, reverse=True)[:3]) if len(win_sims) >= 3 else (np.mean(win_sims) if win_sims else 0)
+    loss_top3 = np.mean(sorted(loss_sims, reverse=True)[:3]) if len(loss_sims) >= 3 else (np.mean(loss_sims) if loss_sims else 0)
+    score_diff = win_top3 - loss_top3
+    if score_diff > 15 and win_top3 > 70:
+        return {"signal": "winner_match", "win_top3": win_top3, "loss_top3": loss_top3}
+    elif score_diff < -15 and loss_top3 > 70:
+        return {"signal": "loser_match", "win_top3": win_top3, "loss_top3": loss_top3}
+    return {"signal": "neutral"}
+
 # ── Analysis ───────────────────────────────────────────────────────────────────
 def check_btc_health():
     try:
@@ -406,7 +446,28 @@ def main():
                   and r["bull"] >= effective_min_bull
                   and r["confidence"] >= cfg.get("min_confidence", 70)
                   and r["coin_name"] not in blocked]
-    candidates.sort(key=lambda x: (x["bull"], x["confidence"]), reverse=True)
+    # Pattern matching boost/penalty
+    for c in candidates:
+        fp = {
+            "rsi": c.get("rsi", 50),
+            "bull": c.get("bull", 0),
+            "bear": c.get("bear", 0),
+            "volume_ratio": c.get("volume_ratio", 1),
+            "category": categorize_coin(c["coin_id"]),
+        }
+        match = pattern_match_score(fp, paper.get("trades", []))
+        c["pattern"] = match["signal"]
+        if match["signal"] == "winner_match":
+            c["adjusted_score"] = c["bull"] + 4
+            print("  WINNER MATCH:", c["coin_name"], "match score:", match.get("win_top3"))
+        elif match["signal"] == "loser_match":
+            c["adjusted_score"] = c["bull"] - 5
+            print("  LOSER MATCH (skipped):", c["coin_name"])
+        else:
+            c["adjusted_score"] = c["bull"]
+    # Filter out loser matches
+    candidates = [c for c in candidates if c.get("pattern") != "loser_match"]
+    candidates.sort(key=lambda x: (x.get("adjusted_score", x["bull"]), x["confidence"]), reverse=True)
     print("Qualifying candidates:", len(candidates))
 
     # Buy
