@@ -339,8 +339,8 @@ def run_backtest(prices, initial_capital=100, stop_loss_pct=5, take_profit_pct=1
         "max_drawdown": max_drawdown, "equity_curve": equity_curve, "trades": trades,
     }
 
-def apply_insights_to_picks(picks, insights):
-    """Re-rank and filter picks based on learned insights."""
+def apply_insights_to_picks(picks, insights, all_trades=None):
+    """Re-rank and filter picks based on learned insights and pattern matching."""
     if not insights:
         return picks
     scored_picks = []
@@ -372,6 +372,23 @@ def apply_insights_to_picks(picks, insights):
                 hv_wr = high_vol["w"] / (high_vol["w"] + high_vol["l"]) * 100
                 if hv_wr > 60:
                     score += 2
+        # ── Pattern matching against past wins/losses ─────────────────
+        if all_trades:
+            current_fp = {
+                "rsi": p.get("rsi", 50),
+                "bull": p.get("bull", 0),
+                "bear": p.get("bear", 0),
+                "volume_ratio": p.get("volume_ratio", 1),
+                "category": cat,
+            }
+            match = pattern_match_score(current_fp, all_trades)
+            p["pattern_match"] = match
+            if match["signal"] == "winner_match":
+                score += 4
+                p["insight_boost"] = p.get("insight_boost", "") + " · 🎯 Looks like past winner (" + str(match["win_top3"]) + "% match)"
+            elif match["signal"] == "loser_match":
+                score -= 5
+                p["insight_warning"] = p.get("insight_warning", "") + " · 💀 Looks like past loser (" + str(match["loss_top3"]) + "% match)"
         p["adjusted_score"] = score
         scored_picks.append(p)
     scored_picks.sort(key=lambda x: x["adjusted_score"], reverse=True)
@@ -639,6 +656,75 @@ def categorize_coin(coin_id):
     return "Other"
 
 TRADE_INSIGHTS_FILE = "trade_insights.json"
+
+def get_fingerprint(trade):
+    """Extract feature fingerprint from a trade for pattern matching."""
+    return {
+        "rsi": trade.get("entry_rsi", 50),
+        "bull": trade.get("entry_bull", 0),
+        "bear": trade.get("entry_bear", 0),
+        "volume_ratio": trade.get("entry_volume_ratio", 1.0),
+        "category": trade.get("entry_category", "Other"),
+    }
+
+def fingerprint_similarity(fp_current, fp_past):
+    """Calculate similarity between two fingerprints (0-100)."""
+    score = 100
+    # RSI distance (max 30 difference penalized)
+    rsi_diff = abs(fp_current.get("rsi", 50) - fp_past.get("rsi", 50))
+    score -= min(rsi_diff * 1.5, 30)
+    # Bull score distance
+    bull_diff = abs(fp_current.get("bull", 0) - fp_past.get("bull", 0))
+    score -= min(bull_diff * 3, 20)
+    # Volume ratio distance
+    vol_diff = abs(fp_current.get("volume_ratio", 1) - fp_past.get("volume_ratio", 1))
+    score -= min(vol_diff * 10, 20)
+    # Same category bonus
+    if fp_current.get("category") == fp_past.get("category"):
+        score += 10
+    else:
+        score -= 5
+    return max(0, min(100, score))
+
+def pattern_match_score(current_features, trades):
+    """Compare current candidate to past wins and losses.
+    Returns dict: {win_match_avg, loss_match_avg, signal, wins_compared, losses_compared}"""
+    sell_trades = [t for t in trades if t["type"] == "SELL"]
+    wins = [t for t in sell_trades if t["profit_usd"] > 0]
+    losses = [t for t in sell_trades if t["profit_usd"] <= 0]
+    if len(wins) < 5:
+        return {"signal": "insufficient_data", "wins_compared": len(wins), "losses_compared": len(losses)}
+    win_similarities = []
+    for w in wins:
+        fp_win = get_fingerprint(w)
+        sim = fingerprint_similarity(current_features, fp_win)
+        win_similarities.append(sim)
+    loss_similarities = []
+    for l in losses:
+        fp_loss = get_fingerprint(l)
+        sim = fingerprint_similarity(current_features, fp_loss)
+        loss_similarities.append(sim)
+    win_avg = np.mean(win_similarities) if win_similarities else 0
+    loss_avg = np.mean(loss_similarities) if loss_similarities else 0
+    win_top3 = np.mean(sorted(win_similarities, reverse=True)[:3]) if len(win_similarities) >= 3 else win_avg
+    loss_top3 = np.mean(sorted(loss_similarities, reverse=True)[:3]) if len(loss_similarities) >= 3 else loss_avg
+    score_diff = win_top3 - loss_top3
+    if score_diff > 15 and win_top3 > 70:
+        signal = "winner_match"
+    elif score_diff < -15 and loss_top3 > 70:
+        signal = "loser_match"
+    else:
+        signal = "neutral"
+    return {
+        "signal": signal,
+        "win_match_avg": round(win_avg, 1),
+        "loss_match_avg": round(loss_avg, 1),
+        "win_top3": round(win_top3, 1),
+        "loss_top3": round(loss_top3, 1),
+        "score_diff": round(score_diff, 1),
+        "wins_compared": len(wins),
+        "losses_compared": len(losses),
+    }
 
 def generate_trade_insights(trades):
     """Analyze closed trades and generate learning insights."""
@@ -1159,7 +1245,7 @@ with st.expander("🎯 **Today's Picks** — smart suggestions based on signals"
         new_picks = [r for r in ranked if r["coin_name"] not in held_coins]
         trade_insights = generate_trade_insights(paper_data_pick.get("trades", []))
         if trade_insights:
-            new_picks = apply_insights_to_picks(new_picks, trade_insights)
+            new_picks = apply_insights_to_picks(new_picks, trade_insights, paper_data_pick.get("trades", []))
         st.session_state["picks_results"] = {
             "new_picks": new_picks[:3],
             "all_strong": ranked,
@@ -2207,7 +2293,7 @@ with tab5:
             if blocked_count > 0:
                 cfg["log"].insert(0, str(datetime.now())[:19] + " · 🚫 Re-entry blocker: skipped " + str(blocked_count) + " coins (" + ", ".join(blocked_coins) + ")")
         if insights_now:
-            candidates = apply_insights_to_picks(candidates, insights_now)
+            candidates = apply_insights_to_picks(candidates, insights_now, paper_d.get("trades", []))
             candidates = [c for c in candidates if c.get("adjusted_score", c["bull"]) >= effective_min_bull]
         else:
             candidates.sort(key=lambda x: (x["bull"], x["confidence"]), reverse=True)
