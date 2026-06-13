@@ -100,6 +100,48 @@ def categorize_coin(coin_id):
     if coin_id in privacy: return "Privacy"
     return "Other"
 
+def calculate_atr(prices, period=14):
+    """Calculate ATR from price series. Returns ATR % (as fraction)."""
+    if len(prices) < period + 1:
+        return 0.05
+    try:
+        # Without OHLC, approximate ATR using rolling high-low range of close prices
+        df = pd.DataFrame({"close": prices})
+        df["high"] = df["close"].rolling(2).max()
+        df["low"] = df["close"].rolling(2).min()
+        df["tr"] = df["high"] - df["low"]
+        atr = df["tr"].rolling(period).mean().iloc[-1]
+        current = prices[-1]
+        return float(atr / current) if current > 0 else 0.05
+    except:
+        return 0.05
+
+def detect_market_regime():
+    """Returns 'bull', 'range', or 'bear' based on BTC vs 200-day SMA and ADX."""
+    try:
+        url = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=210"
+        res = requests.get(url, headers=HEADERS, timeout=15)
+        prices = [p[1] for p in res.json()["prices"]]
+        if len(prices) < 200:
+            return "range"
+        df = pd.DataFrame({"close": prices})
+        sma200 = df["close"].rolling(200).mean().iloc[-1]
+        current = prices[-1]
+        # Approximate ADX via rolling close range
+        df["high"] = df["close"].rolling(2).max()
+        df["low"] = df["close"].rolling(2).min()
+        df["range"] = (df["high"] - df["low"]) / df["close"]
+        avg_range = df["range"].rolling(14).mean().iloc[-1]
+        trending = avg_range > 0.02  # Rough proxy: >2% avg daily range = trending
+        if current > sma200 * 1.02 and trending:
+            return "bull"
+        elif current < sma200 * 0.98:
+            return "bear"
+        return "range"
+    except Exception as e:
+        print("detect_market_regime error:", e)
+        return "range"
+
 def get_fingerprint(trade):
     return {
         "rsi": trade.get("entry_rsi", 50),
@@ -189,17 +231,29 @@ def detect_box_breakout(prices, volumes):
         return None
 
 def analyze_coin(coin_id):
+    """Uses 4-hour candles by fetching 30 days of hourly data and resampling."""
     try:
-        hist_url = "https://api.coingecko.com/api/v3/coins/" + coin_id + "/market_chart?vs_currency=usd&days=90"
+        # days=30 returns hourly data from CoinGecko
+        hist_url = "https://api.coingecko.com/api/v3/coins/" + coin_id + "/market_chart?vs_currency=usd&days=30"
         hist_res = requests.get(hist_url, headers=HEADERS, timeout=10)
         market_url = "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids=" + coin_id
         market_res = requests.get(market_url, headers=HEADERS, timeout=10)
         market_data = market_res.json()[0]
-        prices = [p[1] for p in hist_res.json()["prices"]]
-        volumes = [v[1] for v in hist_res.json()["total_volumes"]]
-        if len(prices) < 20:
+        raw_data = hist_res.json()
+        if "prices" not in raw_data or len(raw_data["prices"]) < 50:
             return None
-        df = pd.DataFrame({"close": prices, "volume": volumes})
+        # Resample hourly data to 4-hour candles
+        df_raw = pd.DataFrame({
+            "ts": [p[0] for p in raw_data["prices"]],
+            "price": [p[1] for p in raw_data["prices"]],
+            "volume": [v[1] for v in raw_data["total_volumes"]],
+        })
+        df_raw["dt"] = pd.to_datetime(df_raw["ts"], unit="ms")
+        df_raw = df_raw.set_index("dt")
+        df = df_raw.resample("4H").agg({"price": "last", "volume": "sum"}).dropna()
+        df = df.rename(columns={"price": "close"})
+        if len(df) < 25:
+            return None
         df["rsi"] = ta.momentum.RSIIndicator(df["close"], window=14).rsi()
         macd = ta.trend.MACD(df["close"])
         df["macd_hist"] = macd.macd_diff()
@@ -212,7 +266,7 @@ def analyze_coin(coin_id):
         change_24h = market_data["price_change_percentage_24h"] or 0
         avg_volume = df["volume"].mean()
         current_volume = market_data["total_volume"] or 0
-        volume_ratio = current_volume / avg_volume if avg_volume > 0 else 1
+        volume_ratio = current_volume / (avg_volume * 6) if avg_volume > 0 else 1  # 6 4h-candles per day
         bull = bear = 0
         if latest["rsi"] < 35: bull += 2
         elif latest["rsi"] > 65: bear += 2
@@ -258,6 +312,31 @@ def main():
         print("Auto-Pilot is DISABLED. Exiting.")
         return
 
+    # ── Race condition lock ───────────────────────────────────────────────────
+    if cfg.get("is_running"):
+        lock_time = cfg.get("lock_started")
+        if lock_time:
+            lock_dt = datetime.fromisoformat(lock_time)
+            mins_locked = (datetime.now() - lock_dt).total_seconds() / 60
+            if mins_locked < 10:
+                print("Another run is already in progress. Exiting to prevent race condition.")
+                return
+            else:
+                print("Stale lock detected (>" + str(int(mins_locked)) + " min old). Clearing and continuing.")
+    cfg["is_running"] = True
+    cfg["lock_started"] = datetime.now().isoformat()
+    supabase_set("autopilot_config", "main", cfg)
+    try:
+        run_main_logic(cfg)
+    finally:
+        cfg = supabase_get("autopilot_config", "main") or cfg
+        cfg["is_running"] = False
+        cfg["lock_started"] = None
+        supabase_set("autopilot_config", "main", cfg)
+        print("Lock released.")
+
+def run_main_logic(cfg):
+
     paper = supabase_get("paper_trades", "main") or {"balance": 10000.0, "trades": [], "positions": {}}
     held = set(paper.get("positions", {}).keys())
     print("Current balance: $" + str(paper["balance"]))
@@ -284,11 +363,19 @@ def main():
         tp_price = pos.get("tp_price", entry_px * 1.15)
         trailing_sl = pos.get("trailing_sl", sl_price)
         highest = pos.get("highest_price", entry_px)
+        # ── ATR-based trailing stop ────────────────────────────────
+        try:
+            hist_url = "https://api.coingecko.com/api/v3/coins/" + coin_id_pos + "/market_chart?vs_currency=usd&days=30"
+            hist_prices = [p[1] for p in requests.get(hist_url, headers=HEADERS, timeout=10).json()["prices"]]
+            atr_pct = calculate_atr(hist_prices)
+        except:
+            atr_pct = 0.05
         if current_px > highest:
             highest = current_px
             gain = ((current_px - entry_px) / entry_px) * 100
             if gain >= 2:
-                new_trail = current_px * 0.95
+                # Trailing stop = current price - (2 * ATR)
+                new_trail = current_px * (1 - 2 * atr_pct)
                 if new_trail > trailing_sl:
                     trailing_sl = new_trail
             pos["highest_price"] = highest
@@ -418,6 +505,22 @@ def main():
         elif fg > 80:
             effective_min_bull = effective_min_bull + 2
 
+    # ── Market Regime Detection ───────────────────────────────────────────────
+    regime = detect_market_regime() if cfg.get("market_regime", True) else "range"
+    print("Market regime:", regime)
+    regime_tp_ratio = 2.0
+    if regime == "bull":
+        regime_tp_ratio = 3.0
+        effective_min_bull = max(effective_min_bull - 1, 7)
+        print("  Bull regime: looser buying, wider TPs (3x SL)")
+    elif regime == "range":
+        regime_tp_ratio = 1.5
+        print("  Range regime: tighter TPs (1.5x SL)")
+    elif regime == "bear":
+        regime_tp_ratio = 1.5
+        effective_min_bull = effective_min_bull + 2
+        print("  Bear regime: stricter buying")
+
     # ── Scan ──────────────────────────────────────────────────────────────────
     print("\n--- Scanning coins ---")
     coins = all_coins
@@ -476,18 +579,31 @@ def main():
         cfg.get("max_trades_per_day", 5) - len(trades_today),
         len(candidates),
     )
-    pos_size = cfg.get("position_size", 500.0)
+    pos_size_default = cfg.get("position_size", 500.0)
     stop_loss_pct = 5.0
-    take_profit_ratio = 2.0
+    take_profit_ratio = regime_tp_ratio
+    risk_based_sizing = cfg.get("risk_based_sizing", True)
+    account_risk_pct = cfg.get("account_risk_pct", 2.0)
 
     bought = []
     for c in candidates[:slots]:
-        if paper["balance"] < pos_size:
-            break
         entry = c["price"]
-        coins_bought = pos_size / entry
         sl_px = entry * (1 - stop_loss_pct / 100)
         tp_px = entry + (entry - sl_px) * take_profit_ratio
+        # Risk-based position size
+        if risk_based_sizing:
+            account_total = paper["balance"] + sum(p["cost"] for p in paper["positions"].values())
+            risk_dollars = account_total * (account_risk_pct / 100)
+            sl_distance = entry - sl_px
+            pos_size = (risk_dollars / sl_distance) * entry if sl_distance > 0 else pos_size_default
+            # Sanity bounds
+            pos_size = min(max(pos_size, 100.0), account_total * 0.20)
+        else:
+            pos_size = pos_size_default
+        if paper["balance"] < pos_size:
+            print("  Skipped", c["coin_name"], "- balance too low")
+            break
+        coins_bought = pos_size / entry
         paper["balance"] -= pos_size
         paper["positions"][c["coin_name"]] = {
             "coins": coins_bought, "entry_price": entry, "cost": pos_size,
@@ -505,7 +621,7 @@ def main():
         })
         bought.append(c["coin_name"])
         cfg.setdefault("trades_today", []).append(str(datetime.now())[:19])
-        send_telegram("🤖 <b>AUTO-PILOT BOUGHT</b>\n" + c["coin_name"] + " @ $" + str(round(entry, 4)) + "\nBull: " + str(c["bull"]) + " · " + str(c["confidence"]) + "%\nSL: $" + str(round(sl_px, 4)) + " · TP: $" + str(round(tp_px, 4)))
+        send_telegram("🤖 <b>AUTO-PILOT BOUGHT</b>\n" + c["coin_name"] + " @ $" + str(round(entry, 4)) + "\nBull: " + str(c["bull"]) + " · " + str(c["confidence"]) + "%\nSize: $" + str(round(pos_size, 2)) + " (" + regime + " regime)\nSL: $" + str(round(sl_px, 4)) + " · TP: $" + str(round(tp_px, 4)))
         print("BOUGHT:", c["coin_name"], "@", entry)
 
     if bought:
