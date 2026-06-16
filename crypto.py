@@ -247,6 +247,31 @@ def calculate_atr(prices, period=14):
     tr_list = [abs(prices_array[i] - prices_array[i-1]) for i in range(1, len(prices_array))]
     return np.mean(tr_list[-period:])
 
+def detect_market_regime_streamlit():
+    """Returns dict: {regime, btc_vs_sma_pct, label}"""
+    try:
+        url = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=210"
+        res = requests.get(url, headers=HEADERS, timeout=15)
+        prices = [p[1] for p in res.json()["prices"]]
+        if len(prices) < 200:
+            return {"regime": "range", "label": "Range (insufficient data)", "btc_vs_sma_pct": 0}
+        df = pd.DataFrame({"close": prices})
+        sma200 = df["close"].rolling(200).mean().iloc[-1]
+        current = prices[-1]
+        btc_vs_sma = ((current - sma200) / sma200) * 100
+        df["high"] = df["close"].rolling(2).max()
+        df["low"] = df["close"].rolling(2).min()
+        df["range"] = (df["high"] - df["low"]) / df["close"]
+        avg_range = df["range"].rolling(14).mean().iloc[-1]
+        trending = avg_range > 0.02
+        if current > sma200 * 1.02 and trending:
+            return {"regime": "bull", "label": "🐂 Bull Market", "btc_vs_sma_pct": btc_vs_sma}
+        elif current < sma200 * 0.98:
+            return {"regime": "bear", "label": "🐻 Bear Market", "btc_vs_sma_pct": btc_vs_sma}
+        return {"regime": "range", "label": "🦘 Ranging / Chop", "btc_vs_sma_pct": btc_vs_sma}
+    except:
+        return {"regime": "range", "label": "Unknown", "btc_vs_sma_pct": 0}
+
 def calculate_fibonacci(prices):
     high = max(prices)
     low = min(prices)
@@ -1453,6 +1478,22 @@ with tab1:
                 else:
                     sl_price = entry_price * (1 - stop_loss_pct / 100)
                     tp_price = entry_price * (1 + stop_loss_pct * take_profit_ratio / 100)
+                # ATR-based alternative SL
+                atr_sl_price = entry_price - (2 * atr) if "BUY" in signal else entry_price + (2 * atr)
+                # Market regime detection
+                regime_info = detect_market_regime_streamlit()
+                regime = regime_info["regime"]
+                # Regime-adjusted TP
+                if regime == "bull":
+                    regime_tp_ratio = 3.0
+                elif regime == "bear":
+                    regime_tp_ratio = 1.5
+                else:
+                    regime_tp_ratio = take_profit_ratio
+                if "BUY" in signal:
+                    regime_tp_price = entry_price + (entry_price - sl_price) * regime_tp_ratio
+                else:
+                    regime_tp_price = entry_price
                 risk_amount = account_balance * risk_per_trade / 100
                 price_risk = abs(entry_price - sl_price)
                 position_size_coins = risk_amount / price_risk if price_risk > 0 else 0
@@ -1485,11 +1526,27 @@ with tab1:
                 else: st.warning("## Signal: HOLD")
                 st.write("Confidence: " + str(confidence) + "% · Bull: " + str(bull) + " · Bear: " + str(bear))
                 st.divider()
+                # Market regime banner
+                if regime == "bull":
+                    st.success("📡 **Market Regime: " + regime_info["label"] + "** · BTC " + ("+" if regime_info["btc_vs_sma_pct"] >= 0 else "") + str(round(regime_info["btc_vs_sma_pct"], 1)) + "% vs 200-day SMA · Wider TPs recommended (3x SL)")
+                elif regime == "bear":
+                    st.error("📡 **Market Regime: " + regime_info["label"] + "** · BTC " + str(round(regime_info["btc_vs_sma_pct"], 1)) + "% vs 200-day SMA · Avoid new longs, tighter TPs")
+                else:
+                    st.info("📡 **Market Regime: " + regime_info["label"] + "** · BTC " + ("+" if regime_info["btc_vs_sma_pct"] >= 0 else "") + str(round(regime_info["btc_vs_sma_pct"], 1)) + "% vs 200-day SMA · Mean-reversion mode, quick profits")
                 st.subheader("🛡️ Risk Management")
                 rm1, rm2, rm3 = st.columns(3)
                 rm1.metric("📍 Entry", "$" + str(round(entry_price, 4)))
                 rm2.metric("🛑 Stop Loss", "$" + str(round(sl_price, 4)))
                 rm3.metric("🎯 Take Profit", "$" + str(round(tp_price, 4)))
+                # ATR-based alternative
+                with st.expander("📊 Alternative Stops & Regime-Adjusted TP"):
+                    atr_pct_display = round((atr / entry_price) * 100, 2)
+                    alt1, alt2, alt3 = st.columns(3)
+                    alt1.metric("ATR (2x)", "$" + str(round(atr_sl_price, 4)), delta=str(atr_pct_display) + "% ATR")
+                    alt2.metric("Regime-Adjusted TP", "$" + str(round(regime_tp_price, 4)),
+                                delta=str(regime_tp_ratio) + "x SL distance")
+                    alt3.metric("ATR / Volatility", str(atr_pct_display) + "%")
+                    st.caption("ATR-based stops adapt to volatility. Use them in high-vol periods to avoid premature stop-outs. The regime-adjusted TP recommends wider targets in bull markets, tighter in ranges.")
                 ps1, ps2, ps3 = st.columns(3)
                 ps1.metric("💰 Invest", "$" + str(round(position_size_usd_capped, 2)))
                 ps2.metric("🪙 Coins", str(round(position_size_coins, 6)))
